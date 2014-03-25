@@ -3,7 +3,7 @@ lib2framework
 
 Convert an automake project to an Xcode framework. The resulting framework will be created in $HOME/Library/Frameworks but can be moved and/or installed in any other location.
 
-Usage: lib2framework <framework> <id> <version> <dir> [options]
+Usage: lib2framework &lt;framework&gt; &lt;id&gt; &lt;version&gt; &lt;dir&gt; [options]
 
 You may need to predefine environment variables or do anything else necessary to build.
 
