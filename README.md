@@ -17,18 +17,20 @@ lib2framework TIFF org.osgeo.tif 3 tiff-3.9.5
 Now build ImageMagick with that private build of libtiff:
 export CFLAGS=-I$HOME/Library/Frameworks/TIFF.framework/unix/include
 export LDFLAGS=-I$HOME/Library/Frameworks/TIFF.framework/unix/lib
-# Build ImageMagick.
+
+Build ImageMagick.
 lib2framework ImageMagick org.imagemagick.imagemagick 6.6.8 ImageMagick-6.6.8-4 
 
 Get fancy with multiple versions: 
-# Build HDF4
+
+Build HDF4
 export CPPFLAGS=-I$HOME/Library/Frameworks/JPEG.framework/Versions/6/unix/include
 export LDFLAGS=-L$HOME/Library/Frameworks/JPEG.framework/Versions/6/unix/include
 lib2framework HDF org.hdfgroup.hdf 4 hdf-4.2.5 --enable-shared --disable-fortran
 export CPPFLAGS=
 export LDFLAGS=
 
-# Build HDF5.
+Build HDF5.
 lib2framework HDF org.hdfgroup.hdf 5 hdf5-1.8.5-patch1
 
 Some projects need serious hacking:
