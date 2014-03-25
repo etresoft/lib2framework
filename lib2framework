@@ -1,0 +1,332 @@
+#!/usr/bin/perl
+
+use strict;
+
+use Cwd;
+use File::Spec;
+use File::Basename;
+use File::Copy;
+use File::Spec;
+
+die "Usage: lib2framework <framework> <id> <version> <dir> [options]\n"
+    if @ARGV < 4;
+
+# Get the framework name to build.
+my $framework = shift;
+
+# Get the org.project.whatever ID.
+my $id = shift;
+
+# Get the version.
+my $version = shift;
+
+# Get the directory to build.
+my $dir = shift;
+
+# Get any other options.
+my @args = @ARGV;
+
+my $installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks');
+
+# Set framework build path.
+my $frameworkPath = "$installPath/$framework.framework";
+
+# Create the framework bones.
+createFramework($framework, $version);
+
+# Now build the UNIX project.
+buildProject($framework, $version, $dir, @args);
+
+# Turn the library into a framework.
+convertToFramework($framework, $version, $id);
+
+# Create framework bones.
+sub createFramework
+  {
+  my $frameworkName = shift;
+  my $version = shift;
+
+  my $framework = "$installPath/$frameworkName.framework";
+
+  my $frameworkPath = "$framework/Versions/$version";
+
+  mkpath("$frameworkPath/Headers");
+  mkpath("$frameworkPath/Programs");
+  mkpath("$frameworkPath/Resources/Engish.lproj");
+  mkpath("$frameworkPath/unix/lib");
+
+  # Now create some symbolically linked directories.
+  symlink "../Headers", "$frameworkPath/unix/include";
+  symlink "../Programs", "$frameworkPath/unix/bin";
+  symlink "../Resources", "$frameworkPath/unix/share";
+  }
+
+# Build a UNIX project in the unix directory of the framework.
+sub buildProject
+  {
+  my $frameworkName = shift;
+  my $version = shift;
+
+  my $frameworkPath =
+    "$installPath/$frameworkName.framework/Versions/$version";
+
+  my $prefix = File::Spec->rel2abs("$frameworkPath/unix");
+
+  my $dir = shift;
+
+  my @args = @_;
+
+  # Move into the directory.
+  chdir $dir;
+
+  # If there is a configure script, pass the args to it.
+  if(-e 'configure')
+    {
+    system("./configure --prefix=$prefix @args");
+
+    # Make sure we get a fresh build.
+    system("make clean");
+
+    # Build using the provided arguments. If there was a configure script,
+    # the argument list will be empty.
+    system("make");
+
+    # Now install into the framework.
+    system("make install");
+    }
+  else
+    {
+    # Make sure we get a fresh build.
+    system("make @args clean");
+
+    # Build using the provided arguments. If there was a configure script,
+    # the argument list will be empty.
+    system("make @args");
+
+    # Now install into the framework.
+    system("make @args install");
+    }
+
+  chdir "..";
+  }
+
+# Turn a library into a framework.
+sub convertToFramework
+  {
+  my $frameworkName = shift;
+  my $version = shift;
+  my $id = shift;
+
+  my $frameworkPath =
+    "$installPath/$frameworkName.framework/Versions/$version";
+
+  my $prefix = File::Spec->rel2abs("$frameworkPath/unix");
+
+  # Establish the library file and links to it.
+
+  # First I have to find the library.
+  my $library;
+
+  # Scan through the UNIX output lib directory.
+  opendir(DIR, "$prefix/lib");
+
+  while (defined(my $file = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $file =~ /^\.\.?$/;
+
+    # Delete .la files.
+    unlink "$prefix/lib/$file"
+      if $file =~ /\.la$/;
+
+    # Skip anything that isn't a dynamic library.
+    next
+      if $file !~ /\.dylib$/;
+
+    # Skip symbolic links.
+    next
+      if -l "$prefix/lib/$file";
+
+    # Save the library. I assume there will only be one non-link library.
+    $library = "$prefix/lib/$file";
+    }
+
+  closedir(DIR);
+
+  if($library)
+    {
+    # Now create the library via hard link.
+    link $library, "$frameworkPath/$frameworkName";
+
+    # Get rid of the old library.
+    unlink $library;
+
+    # Re-create the library as a symbolic link.
+    $library = basename($library);
+
+    symlink "../../$frameworkName", "$frameworkPath/unix/lib/$library";
+    }
+
+  # Create or update the Current links.
+  setCurrentLink($frameworkName);
+
+  # Create framework resources.
+  createResources($frameworkName, $version, $id);
+  }
+
+# Setup the Current links.
+sub setCurrentLink
+  {
+  my $frameworkName = shift;
+
+  my $latestVersionMajor = 0;
+  my $latestVersionMinor = 0;
+
+  my $frameworkPath = "$installPath/$frameworkName.framework";
+
+  # Should I update the current link?
+  opendir(DIR, "$frameworkPath/Versions");
+
+  while (defined(my $existing = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $existing =~ /^\.\.?$/;
+
+    my ($existingVersionMajor, $existingVersionMinor) =
+      $existing =~ /(\d+)(?:\.(\d+))?/;
+
+    $existingVersionMajor += 0;
+    $existingVersionMinor += 0;
+
+    if($existingVersionMajor > $latestVersionMajor)
+      {
+      $latestVersionMajor = $existingVersionMajor;
+      $latestVersionMinor = $existingVersionMinor;
+      }
+    elsif($existingVersionMajor == $latestVersionMajor)
+      {
+      if($existingVersionMinor > $latestVersionMinor)
+        {
+        $latestVersionMinor = $existingVersionMinor;
+        }
+      }
+    }
+
+  my $latestVersion = "$latestVersionMajor.$latestVersionMinor";
+
+  closedir(DIR);
+
+  # Create the current symbolic linked directory.
+  unlink "$frameworkPath/Versions/Current";
+
+  unlink "$frameworkPath/Headers";
+  unlink "$frameworkPath/Programs";
+  unlink "$frameworkPath/Resources";
+  unlink "$frameworkPath/unix";
+  unlink "$frameworkPath/$framework";
+
+  symlink $latestVersion, "$frameworkPath/Versions/Current";
+
+  symlink "Versions/Current/Headers", "$frameworkPath/Headers";
+  symlink "Versions/Current/Programs", "$frameworkPath/Programs";
+  symlink "Versions/Current/Resources", "$frameworkPath/Resources";
+  symlink "Versions/Current/unix", "$frameworkPath/unix";
+
+  # Finally update the top-level library link.
+  symlink "Versions/Current/$framework", "$frameworkPath/$framework";
+  }
+
+# Create framework resources.
+sub createResources
+  {
+  my $frameworkName = shift;
+  my $version = shift;
+  my $id = shift;
+
+  my $frameworkPath =
+    "$installPath/$frameworkName.framework/Versions/$version";
+
+  # Almost done - create the Info.plist file.
+
+  open(OUT, ">$frameworkPath/Resources/Info.plist");
+
+  print OUT getPlist($frameworkName, $version, $id);
+
+  close(OUT);
+
+  # Finally, look for a license file.
+  my $license;
+
+  # Scan through the source directory.
+  opendir(DIR, "$dir");
+
+  while(defined(my $file = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $file =~ /^\.\.?$/;
+
+    # Get the GNU-stye COPYING file.
+    $license = $file
+      if $file =~ /^COPYING$/;
+
+    $license = $file
+      if $file =~ /license/i;
+
+    last
+      if $license;
+    }
+
+  closedir(DIR);
+
+  copy
+    "$dir/$license", "$frameworkPath/Resources/License.txt";
+  }
+
+# Construct and return a plist file.
+sub getPlist
+  {
+  my $frameworkName = shift;
+  my $version = shift;
+  my $id = shift;
+
+  my $plist = << "EOF";
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>English</string>
+	<key>CFBundleExecutable</key>
+	<string>$frameworkName</string>
+	<key>CFBundleGetInfoString</key>
+	<string>$framework $version</string>
+	<key>CFBundleIdentifier</key>
+	<string>$id</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$frameworkName</string>
+	<key>CFBundlePackageType</key>
+	<string>FMWK</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$version</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$frameworkName $version</string>
+</dict>
+</plist>
+EOF
+
+  return $plist;
+  }
+
+sub mkpath
+  {
+  my $dir = shift;
+
+  system(qq{/bin/mkdir -p "$dir"});
+  }
