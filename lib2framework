@@ -180,53 +180,21 @@ sub setCurrentLink
   {
   my $frameworkName = shift;
 
-  my $latestVersionMajor = 0;
-  my $latestVersionMinor = 0;
-  my $latestVersionUpdate = 0;
-
   my $frameworkPath = "$installPath/$frameworkName.framework";
 
   # Should I update the current link?
   opendir(DIR, "$frameworkPath/Versions");
 
-  while (defined(my $existing = readdir(DIR)))
+  my $latestVersion;
+  
+  while (defined(my $existingVersion = readdir(DIR)))
     {
     # Skip parent and self directory entries.
     next
-      if $existing =~ /^\.\.?$/;
+      if $existingVersion =~ /^\.\.?$/;
 
-    my ($existingVersionMajor, $existingVersionMinor, $existingVersionUpdate) =
-      $existing =~ /(\d+)/g;
-
-    $existingVersionMajor += 0;
-    $existingVersionMinor += 0;
-    $existingVersionUpdate += 0;
-
-    if($existingVersionMajor > $latestVersionMajor)
-      {
-      $latestVersionMajor = $existingVersionMajor;
-      $latestVersionMinor = $existingVersionMinor;
-      $latestVersionUpdate = $existingVersionUpdate;
-      }
-    elsif($existingVersionMajor == $latestVersionMajor)
-      {
-      if($existingVersionMinor > $latestVersionMinor)
-        {
-        $latestVersionMinor = $existingVersionMinor;
-        $latestVersionUpdate = $existingVersionUpdate;
-        }
-      elsif($existingVersionMinor == $latestVersionMinor)
-        {
-        if($existingVersionUpdate > $latestVersionUpdate)
-          {
-          $latestVersionUpdate = $existingVersionUpdate;
-          }
-        }
-      }
+    $latestVersion = maxVersion($existingVersion, $latestVersion);
     }
-
-  my $latestVersion = 
-    "$latestVersionMajor.$latestVersionMinor.$latestVersionUpdate";
 
   closedir(DIR);
 
@@ -250,6 +218,52 @@ sub setCurrentLink
   symlink "Versions/Current/$framework", "$frameworkPath/$framework";
   }
 
+# Find the maximum of two version number strings.
+sub maxVersion
+  {
+  my $value1 = shift;
+  my $value2 = shift;
+
+  my @value1 = $value1 =~ /(\d+)/g;
+  my @value2 = $value2 =~ /(\d+)/g;
+
+  my $index = 0;
+
+  my @max = @value1;
+
+  while(1)
+    {
+    last
+      if not defined $value1[$index];
+    
+    last
+      if not defined $value2[$index];
+
+    if($value1[$index] > $value2[$index])
+      {
+      @max = @value1;
+    
+      last;
+      }
+    elsif($value2[$index] > $value1[$index])
+      {
+      @max = @value2;
+    
+      last;
+      }
+    else
+      {
+      ++$index;
+    
+      next;
+      }
+    }
+  
+  my $max = join('.', @max);
+
+  return $max;
+  }
+  
 # Create framework resources.
 sub createResources
   {
