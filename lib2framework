@@ -7,8 +7,9 @@ use File::Spec;
 use File::Basename;
 use File::Copy;
 use File::Spec;
+use Getopt::Long qw(:config bundling pass_through);
 
-die "Usage: lib2framework <framework> <id> <version> <dir> [options]\n"
+die usage()
     if @ARGV < 4;
 
 # Get the framework name to build.
@@ -23,10 +24,18 @@ my $version = shift;
 # Get the directory to build.
 my $dir = shift;
 
+my $installPath;
+
+GetOptions
+  (
+  'frameworkInstallPath=s' => \$installPath
+  );
+  
 # Get any other options.
 my @args = @ARGV;
 
-my $installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks');
+$installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks')
+  if not $installPath;
 
 # Set framework build path.
 my $frameworkPath = "$installPath/$framework.framework";
@@ -356,3 +365,19 @@ sub mkpath
 
   system(qq{/bin/mkdir -p "$dir"});
   }
+
+# Print usage messages.
+sub usage
+  {
+  my $message = << "EOF";
+Usage: lib2framework <framework> <id> <version> <dir> [options]
+
+  where options are:
+    --frameworkInstallPath=/path/to/install/location
+    
+  Remaining options are passed to configure script.
+EOF
+
+  return $message;
+  }
+  
