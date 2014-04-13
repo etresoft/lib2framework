@@ -182,6 +182,7 @@ sub setCurrentLink
 
   my $latestVersionMajor = 0;
   my $latestVersionMinor = 0;
+  my $latestVersionUpdate = 0;
 
   my $frameworkPath = "$installPath/$frameworkName.framework";
 
@@ -194,27 +195,38 @@ sub setCurrentLink
     next
       if $existing =~ /^\.\.?$/;
 
-    my ($existingVersionMajor, $existingVersionMinor) =
-      $existing =~ /(\d+)(?:\.(\d+))?/;
+    my ($existingVersionMajor, $existingVersionMinor, $existingVersionUpdate) =
+      $existing =~ /(\d+)/g;
 
     $existingVersionMajor += 0;
     $existingVersionMinor += 0;
+    $existingVersionUpdate += 0;
 
     if($existingVersionMajor > $latestVersionMajor)
       {
       $latestVersionMajor = $existingVersionMajor;
       $latestVersionMinor = $existingVersionMinor;
+      $latestVersionUpdate = $existingVersionUpdate;
       }
     elsif($existingVersionMajor == $latestVersionMajor)
       {
       if($existingVersionMinor > $latestVersionMinor)
         {
         $latestVersionMinor = $existingVersionMinor;
+        $latestVersionUpdate = $existingVersionUpdate;
+        }
+      elsif($existingVersionMinor == $latestVersionMinor)
+        {
+        if($existingVersionUpdate > $latestVersionUpdate)
+          {
+          $latestVersionUpdate = $existingVersionUpdate;
+          }
         }
       }
     }
 
-  my $latestVersion = "$latestVersionMajor.$latestVersionMinor";
+  my $latestVersion = 
+    "$latestVersionMajor.$latestVersionMinor.$latestVersionUpdate";
 
   closedir(DIR);
 
