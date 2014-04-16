@@ -9,8 +9,9 @@ use File::Copy;
 use File::Spec;
 use Getopt::Long qw(:config bundling pass_through);
 
+# Print usage message if there aren't enough arguments to run.
 die usage()
-    if @ARGV < 4;
+  if @ARGV < 4;
 
 # Get the framework name to build.
 my $framework = shift;
@@ -21,77 +22,220 @@ my $id = shift;
 # Get the version.
 my $version = shift;
 
-# Get the directory to build.
-my $dir = shift;
+# Get the archive to build.
+my $archive = shift;
 
+my $dir;
+
+# If the archive is a directory, copy it to /tmp to work on it.
+if(-d $archive)
+  {
+  $dir = File::Spec->join('/tmp', $archive);
+  
+  system(qq{/bin/rm -Rf "$dir"});
+  system(qq{/bin/cp "$archive" "$dir"});
+  }
+elsif($archive =~ /\.tgz|\.tar\.gz$/)
+  {
+  system(qq{/bin/rm -Rf "/tmp/$archive"});
+  system(qq{/bin/mkdir -p "/tmp/$archive"});
+  system(qq{/usr/bin/tar zxf "$archive" -C/tmp/$archive});
+  
+  $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
+  
+  chomp $dir;
+  }
+elsif($archive =~ /\.tbz|\.tar\.bz$/)
+  {
+  system(qq{/bin/rm -Rf "/tmp/$archive"});
+  system(qq{/bin/mkdir -p "/tmp/$archive"});
+  system(qq{/usr/bin/tar jxf "$archive" -C/tmp/$archive});
+  
+  $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
+  
+  chomp $dir;
+  }
+  
+# Get optional arguments.
 my $installPath;
+my $sdk;
+my $deployment;
 
 GetOptions
   (
-  'frameworkInstallPath=s' => \$installPath
+  'frameworkInstallPath=s' => \$installPath,
+  'sdk=s' => \$sdk,
+  'deploy=s' => \$deployment
   );
+  
+# Default to ~/Library/Frameworks
+$installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks')
+  if not $installPath;
+
+my $nativeSDK = `/usr/bin/xcrun --show-sdk-path`;
+
+chomp $nativeSDK;
+
+# Setup the SDKROOT. Hopefully this will handle most situations.
+if($sdk)
+  {
+  $ENV{SDKROOT} = `/usr/bin/xcrun --sdk $sdk --show-sdk-path`;
+  
+  chomp $ENV{SDKROOT};
+  }
+
+# Setup some command line arguments in case I need them.
+my @arch;
+my $minversion = '';
+
+$deployment = `xcrun --show-sdk-version`
+  if not $deployment;
+
+chomp $deployment;
+
+# Configure for iPhone.
+if($sdk =~ /^iphoneos/i)
+  {
+  @arch = qw(armv7 armv7s arm64);
+
+  if($deployment)
+    {
+    $minversion = sprintf('-miphoneos-version-min=%s', $deployment);
+    
+    $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
+    }
+  }
+  
+# Configure for iPhone simulator.
+elsif($sdk =~ /^iphonesimulator/i)
+  {
+  @arch = qw(i386 x86_64);
+
+  if($deployment)
+    {
+    $minversion = sprintf('-mios-simulator-version-min=%s', $deployment);
+
+    $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
+    }
+  }
+  
+# Configure for MacOS X.
+elsif($sdk =~ /^macosx/i)
+  {
+  my ($version) = $sdk =~ /^macosx(.+)$/i;
+  
+  @arch = qw(i386 x86_64)
+    if $version && ($version < 10.9);
+    
+  if($deployment)
+    {
+    $minversion = sprintf('-mmacosx-version-min=%s', $deployment);
+
+    $ENV{MACOSX_DEPLOYMENT_TARGET} = $deployment;
+    }
+  }
+
+# Setup the isysroot command-line parameters and PATH, if necessary.
+$ENV{PATH} = sprintf(
+  '%s:%s:/usr/bin:/bin:/usr/sbin:/sbin',
+  $ENV{SDKROOT},
+  "/Applications/Xcode.app/Contents/Developer/usr/bin")
+if $sdk && ($sdk =~ /^iphone/i);
   
 # Get any other options.
 my @args = @ARGV;
 
-$installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks')
-  if not $installPath;
+my $xargs = 
+  {
+  framework => $framework,
+  source => $dir,
+  id => $id,
+  target => $installPath,
+  sdk => $sdk,
+  native => (@arch == 0),
+  minversion => $minversion
+  };
 
-# Set framework build path.
-my $frameworkPath = "$installPath/$framework.framework";
+# Check to see if I have an SDK specified that is actually native.
+if(not $xargs->{native})
+  {
+  $xargs->{native} = 1
+    if $nativeSDK eq $ENV{SDKROOT};
+  }
 
-# Create the framework bones.
-createFramework($framework, $version);
+# Give me one iteration at least.
+@arch = qw(x86_64)
+  if not @arch;
+  
+# Repeat for each architecture.
+foreach my $arch (@arch)
+  {
+  # Now hack up the version for non-native builds.
+  $xargs->{version} = $version;
 
-# Now build the UNIX project.
-buildProject($framework, $version, $dir, @args);
+  $xargs->{version} .= sprintf('-%s-%s', $xargs->{sdk}, $arch)
+    if not $xargs->{native};
+  
+  $ENV{CFLAGS} = "-arch $arch -isysroot $ENV{SDKROOT} $minversion"
+    if not $xargs->{native};
+  
+  # Create the framework bones.
+  createFramework($xargs);
 
-# Turn the library into a framework.
-convertToFramework($framework, $version, $id);
+  # Now build the UNIX project.
+  buildProject($xargs, @args);
 
+  # Turn the library into a framework.
+  convertToFramework($xargs);
+
+  # Install the final framework.
+  installFramework($xargs);
+  }
+  
 # Create framework bones.
 sub createFramework
   {
-  my $frameworkName = shift;
-  my $version = shift;
+  my $xargs = shift;
 
-  my $framework = "$installPath/$frameworkName.framework";
+  my $frameworkPath = 
+    sprintf('/tmp/%s.framework', $xargs->{framework});
 
-  my $frameworkPath = "$framework/Versions/$version";
+  system(qq{/bin/rm -Rf "$frameworkPath"});
+  
+  my $frameworkVersionPath = 
+    "$frameworkPath/Versions/" . $xargs->{version};
 
-  mkpath("$frameworkPath/Headers");
-  mkpath("$frameworkPath/Programs");
-  mkpath("$frameworkPath/Resources/Engish.lproj");
-  mkpath("$frameworkPath/unix/lib");
+  mkpath("$frameworkVersionPath/Headers");
+  mkpath("$frameworkVersionPath/Programs");
+  mkpath("$frameworkVersionPath/Resources/Engish.lproj");
+  mkpath("$frameworkVersionPath/unix/lib");
 
   # Now create some symbolically linked directories.
-  symlink "../Headers", "$frameworkPath/unix/include";
-  symlink "../Programs", "$frameworkPath/unix/bin";
-  symlink "../Resources", "$frameworkPath/unix/share";
+  symlink "../Headers", "$frameworkVersionPath/unix/include";
+  symlink "../Programs", "$frameworkVersionPath/unix/bin";
+  symlink "../Resources", "$frameworkVersionPath/unix/share";
   }
 
 # Build a UNIX project in the unix directory of the framework.
 sub buildProject
   {
-  my $frameworkName = shift;
-  my $version = shift;
-
-  my $frameworkPath =
-    "$installPath/$frameworkName.framework/Versions/$version";
-
-  my $prefix = File::Spec->rel2abs("$frameworkPath/unix");
-
-  my $dir = shift;
-
+  my $xargs = shift;
   my @args = @_;
 
+  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
+
+  my $frameworkVersionPath = 
+    "$frameworkPath/Versions/" . $xargs->{version};
+
+  my $prefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
+
   # Move into the directory.
-  chdir $dir;
+  chdir $xargs->{source};
 
   # If there is a configure script, pass the args to it.
   if(-e 'configure')
     {
-    system("./configure --prefix=$prefix @args");
+    system(qq{./configure --prefix=$prefix @args});
 
     # Make sure we get a fresh build.
     system("make clean");
@@ -122,14 +266,15 @@ sub buildProject
 # Turn a library into a framework.
 sub convertToFramework
   {
-  my $frameworkName = shift;
-  my $version = shift;
-  my $id = shift;
+  my $xargs = shift;
+  my @args = @_;
 
-  my $frameworkPath =
-    "$installPath/$frameworkName.framework/Versions/$version";
+  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
 
-  my $prefix = File::Spec->rel2abs("$frameworkPath/unix");
+  my $frameworkVersionPath = 
+    "$frameworkPath/Versions/" . $xargs->{version};
+
+  my $prefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
 
   # Establish the library file and links to it.
 
@@ -166,7 +311,7 @@ sub convertToFramework
   if($library)
     {
     # Now create the library via hard link.
-    link $library, "$frameworkPath/$frameworkName";
+    link $library, "$frameworkVersionPath/" . $xargs->{framework};
 
     # Get rid of the old library.
     unlink $library;
@@ -174,22 +319,50 @@ sub convertToFramework
     # Re-create the library as a symbolic link.
     $library = basename($library);
 
-    symlink "../../$frameworkName", "$frameworkPath/unix/lib/$library";
+    symlink 
+       "../../" . $xargs->{framework}, 
+       "$frameworkVersionPath/unix/lib/$library";
     }
-
-  # Create or update the Current links.
-  setCurrentLink($frameworkName);
-
-  # Create framework resources.
-  createResources($frameworkName, $version, $id);
   }
 
+# Install the framework
+sub installFramework
+  {
+  my $xargs = shift;
+  my @args = @_;
+
+  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
+
+  my $frameworkVersionPath = 
+    "$frameworkPath/Versions/" . $xargs->{version};
+  
+  my $targetPath = 
+    sprintf('%s/%s.framework', $xargs->{target}, $xargs->{framework});
+  
+  my $targetVersionPath = "$targetPath/Versions/" . $xargs->{version};
+  
+  system(qq{/bin/mkdir -p "$targetPath/Versions"});
+  
+  system(qq{/bin/rm -Rf "$targetVersionPath"});
+
+  system(qq{/bin/mv "$frameworkVersionPath" "$targetVersionPath"});
+
+  # Create framework resources.
+  createResources(
+    $xargs->{framework}, $targetPath, $xargs->{version}, $xargs->{id});
+  
+  # Only setup the Current links if I am not cross-compiling.
+  return
+    if not $xargs->{native};
+       
+  # Create or update the Current links.
+  setCurrentLink($targetPath);
+  }
+  
 # Setup the Current links.
 sub setCurrentLink
   {
-  my $frameworkName = shift;
-
-  my $frameworkPath = "$installPath/$frameworkName.framework";
+  my $frameworkPath = shift;
 
   # Should I update the current link?
   opendir(DIR, "$frameworkPath/Versions");
@@ -277,15 +450,13 @@ sub maxVersion
 sub createResources
   {
   my $frameworkName = shift;
+  my $frameworkVersionPath = shift;
   my $version = shift;
   my $id = shift;
 
-  my $frameworkPath =
-    "$installPath/$frameworkName.framework/Versions/$version";
-
   # Almost done - create the Info.plist file.
 
-  open(OUT, ">$frameworkPath/Resources/Info.plist");
+  open(OUT, ">$frameworkVersionPath/Resources/Info.plist");
 
   print OUT getPlist($frameworkName, $version, $id);
 
@@ -317,7 +488,8 @@ sub createResources
   closedir(DIR);
 
   copy
-    "$dir/$license", "$frameworkPath/Resources/License.txt";
+    "$dir/$license", "$frameworkVersionPath/Resources/License.txt"
+    if $license;
   }
 
 # Construct and return a plist file.
@@ -374,6 +546,8 @@ Usage: lib2framework <framework> <id> <version> <dir> [options]
 
   where options are:
     --frameworkInstallPath=/path/to/install/location
+    --sdk=<SDK in xcrun nomenclature. e.g. macosx, iphonesimulator6.1, etc.>
+    --deploy=<minimum OS version>
     
   Remaining options are passed to configure script.
 EOF
