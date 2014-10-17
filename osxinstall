@@ -1,0 +1,16 @@
+#!/usr/bin/perl
+
+use strict;
+
+use File::Basename;
+
+my $target = pop;
+
+my $dir = 
+  -d $target
+    ? $target
+    : dirname($target);
+
+system(qq{/bin/mkdir -p $dir});
+
+system(qq{/usr/bin/install @ARGV $target});

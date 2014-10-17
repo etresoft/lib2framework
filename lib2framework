@@ -25,6 +25,22 @@ my $version = shift;
 # Get the archive to build.
 my $archive = shift;
 
+# Get optional arguments.
+my $installPath;
+my $sdk;
+my $deployment;
+my $target;
+my $debug;
+
+GetOptions
+  (
+  'frameworkInstallPath=s' => \$installPath,
+  'sdk=s' => \$sdk,
+  'deploy=s' => \$deployment,
+  'target=s' => \$target,
+  'debug' => \$debug
+  );
+  
 my $dir;
 
 # If the archive is a directory, copy it to /tmp to work on it.
@@ -32,14 +48,14 @@ if(-d $archive)
   {
   $dir = File::Spec->join('/tmp', $archive);
   
-  system(qq{/bin/rm -Rf "$dir"});
-  system(qq{/bin/cp "$archive" "$dir"});
+  runsystem(qq{/bin/rm -Rf "$dir"});
+  runsystem(qq{/bin/cp -R "$archive" "$dir"});
   }
 elsif($archive =~ /\.tgz|\.tar\.gz$/)
   {
-  system(qq{/bin/rm -Rf "/tmp/$archive"});
-  system(qq{/bin/mkdir -p "/tmp/$archive"});
-  system(qq{/usr/bin/tar zxf "$archive" -C/tmp/$archive});
+  runsystem(qq{/bin/rm -Rf "/tmp/$archive"});
+  runsystem(qq{/bin/mkdir -p "/tmp/$archive"});
+  runsystem(qq{/usr/bin/tar zxf "$archive" -C/tmp/$archive});
   
   $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
   
@@ -47,63 +63,56 @@ elsif($archive =~ /\.tgz|\.tar\.gz$/)
   }
 elsif($archive =~ /\.tbz|\.tar\.bz$/)
   {
-  system(qq{/bin/rm -Rf "/tmp/$archive"});
-  system(qq{/bin/mkdir -p "/tmp/$archive"});
-  system(qq{/usr/bin/tar jxf "$archive" -C/tmp/$archive});
+  runsystem(qq{/bin/rm -Rf "/tmp/$archive"});
+  runsystem(qq{/bin/mkdir -p "/tmp/$archive"});
+  runsystem(qq{/usr/bin/tar jxf "$archive" -C/tmp/$archive});
   
   $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
   
   chomp $dir;
   }
   
-# Get optional arguments.
-my $installPath;
-my $sdk;
-my $deployment;
+# Set a default framework install path.
+my $defaultInstallPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks');
 
-GetOptions
-  (
-  'frameworkInstallPath=s' => \$installPath,
-  'sdk=s' => \$sdk,
-  'deploy=s' => \$deployment
-  );
-  
 # Default to ~/Library/Frameworks
-$installPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks')
+$installPath = $defaultInstallPath
   if not $installPath;
 
-my $nativeSDK = `/usr/bin/xcrun --show-sdk-path`;
+# Set a default SDK.
+$sdk = 'macosx'
+  if not $sdk;
 
-chomp $nativeSDK;
-
-# Setup the SDKROOT. Hopefully this will handle most situations.
-if($sdk)
+# Set a default deployment.  
+if(not $deployment)
   {
-  $ENV{SDKROOT} = `/usr/bin/xcrun --sdk $sdk --show-sdk-path`;
-  
-  chomp $ENV{SDKROOT};
+  $deployment = `xcrun --sdk $sdk --show-sdk-version`;
+
+  chomp $deployment;
   }
+  
+# Setup the SDKROOT. Hopefully this will handle most situations.
+$ENV{SDKROOT} = `/usr/bin/xcrun --sdk $sdk --show-sdk-path`;
+  
+chomp $ENV{SDKROOT};
+
+# Get any other options.
+my @args = @ARGV;
 
 # Setup some command line arguments in case I need them.
 my @arch;
 my $minversion = '';
-
-$deployment = `xcrun --show-sdk-version`
-  if not $deployment;
-
-chomp $deployment;
 
 # Configure for iPhone.
 if($sdk =~ /^iphoneos/i)
   {
   @arch = qw(armv7 armv7s arm64);
 
-  if($deployment)
-    {
-    $minversion = sprintf('-miphoneos-version-min=%s', $deployment);
+  $minversion = sprintf('-miphoneos-version-min=%s', $deployment);
     
-    $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
-    }
+  $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
+  
+  push @args, qw(--build=x86_64-apple-darwin12 --host=arm-apple-darwin10)
   }
   
 # Configure for iPhone simulator.
@@ -111,12 +120,9 @@ elsif($sdk =~ /^iphonesimulator/i)
   {
   @arch = qw(i386 x86_64);
 
-  if($deployment)
-    {
-    $minversion = sprintf('-mios-simulator-version-min=%s', $deployment);
+  $minversion = sprintf('-mios-simulator-version-min=%s', $deployment);
 
-    $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
-    }
+  $ENV{IPHONEOS_DEPLOYMENT_TARGET} = $deployment;
   }
   
 # Configure for MacOS X.
@@ -124,17 +130,22 @@ elsif($sdk =~ /^macosx/i)
   {
   my ($version) = $sdk =~ /^macosx(.+)$/i;
   
-  @arch = qw(i386 x86_64)
-    if $version && ($version < 10.9);
+  @arch = qw(i386 x86_64);
     
-  if($deployment)
-    {
-    $minversion = sprintf('-mmacosx-version-min=%s', $deployment);
+  $minversion = sprintf('-mmacosx-version-min=%s', $deployment);
 
-    $ENV{MACOSX_DEPLOYMENT_TARGET} = $deployment;
-    }
+  $ENV{MACOSX_DEPLOYMENT_TARGET} = $deployment;
   }
 
+# Tack on a horrible path for platform and SDK-specific frameworks.
+my @parts = split /\//, $ENV{SDKROOT};
+my @dirParts = @parts[4..9];
+
+$installPath = 
+  File::Spec->join(
+    $installPath, @dirParts, 'Frameworks')
+  if $installPath ne $defaultInstallPath;
+  
 # Setup the isysroot command-line parameters and PATH, if necessary.
 $ENV{PATH} = sprintf(
   '%s:%s:/usr/bin:/bin:/usr/sbin:/sbin',
@@ -142,68 +153,52 @@ $ENV{PATH} = sprintf(
   "/Applications/Xcode.app/Contents/Developer/usr/bin")
 if $sdk && ($sdk =~ /^iphone/i);
   
-# Get any other options.
-my @args = @ARGV;
-
 my $xargs = 
   {
   framework => $framework,
   source => $dir,
   id => $id,
-  target => $installPath,
   sdk => $sdk,
-  native => (@arch == 0),
-  minversion => $minversion
+  minversion => $minversion,
+  frameworkPath =>     
+    File::Spec->join($installPath, sprintf('%s.framework', $framework))
   };
 
-# Check to see if I have an SDK specified that is actually native.
-if(not $xargs->{native})
-  {
-  $xargs->{native} = 1
-    if $nativeSDK eq $ENV{SDKROOT};
-  }
+# Create a full install directory tree.
 
 # Give me one iteration at least.
 @arch = qw(x86_64)
   if not @arch;
   
-# Repeat for each architecture.
-foreach my $arch (@arch)
-  {
-  # Now hack up the version for non-native builds.
-  $xargs->{version} = $version;
+my @archList = map { '-arch ' . $_ } @arch;
 
-  $xargs->{version} .= sprintf('-%s-%s', $xargs->{sdk}, $arch)
-    if not $xargs->{native};
-  
-  $ENV{CFLAGS} = "-arch $arch -isysroot $ENV{SDKROOT} $minversion"
-    if not $xargs->{native};
-  
-  # Create the framework bones.
-  createFramework($xargs);
+# Now hack up the version for non-native builds.
+$xargs->{version} = $version;
 
-  # Now build the UNIX project.
-  buildProject($xargs, @args);
+$ENV{CFLAGS} = "@archList -isysroot $ENV{SDKROOT} $minversion";
+$ENV{CXXFLAGS} = "@archList -isysroot $ENV{SDKROOT} $minversion";
 
-  # Turn the library into a framework.
-  convertToFramework($xargs);
+# Create the framework bones.
+createFramework($xargs);
 
-  # Install the final framework.
-  installFramework($xargs);
-  }
+# Now build the UNIX project.
+buildProject($xargs, @args);
+
+# Turn the library into a framework.
+convertToFramework($xargs);
+
+# Install the final framework.
+installFramework($xargs);
   
 # Create framework bones.
 sub createFramework
   {
   my $xargs = shift;
 
-  my $frameworkPath = 
-    sprintf('/tmp/%s.framework', $xargs->{framework});
+  my $frameworkPath = $xargs->{frameworkPath};
 
-  system(qq{/bin/rm -Rf "$frameworkPath"});
-  
   my $frameworkVersionPath = 
-    "$frameworkPath/Versions/" . $xargs->{version};
+    File::Spec->join($frameworkPath, 'Versions', $xargs->{version});
 
   mkpath("$frameworkVersionPath/Headers");
   mkpath("$frameworkVersionPath/Programs");
@@ -222,10 +217,14 @@ sub buildProject
   my $xargs = shift;
   my @args = @_;
 
-  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
+  my $frameworkPath = $xargs->{frameworkPath};
 
-  my $frameworkVersionPath = 
+  my $frameworkVersionPath =  
     "$frameworkPath/Versions/" . $xargs->{version};
+
+  runsystem(qq{/bin/rm -Rf "$frameworkVersionPath"});
+
+  runsystem(qq{/bin/mkdir -p "$frameworkVersionPath/unix"});
 
   my $prefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
 
@@ -235,29 +234,37 @@ sub buildProject
   # If there is a configure script, pass the args to it.
   if(-e 'configure')
     {
-    system(qq{./configure --prefix=$prefix @args});
+    runsystem(qq{./configure --prefix=$prefix @args});
 
     # Make sure we get a fresh build.
-    system("make clean");
+    runsystem("make clean");
 
     # Build using the provided arguments. If there was a configure script,
     # the argument list will be empty.
-    system("make");
+    runsystem("make");
 
     # Now install into the framework.
-    system("make install");
+    runsystem("make install");
+    
+    # Do a custom build.
+    runsystem("make $target")
+      if $target;
     }
   else
     {
     # Make sure we get a fresh build.
-    system("make @args clean");
+    runsystem("make @args clean");
 
     # Build using the provided arguments. If there was a configure script,
     # the argument list will be empty.
-    system("make @args");
+    runsystem("make @args");
 
     # Now install into the framework.
-    system("make @args install");
+    runsystem("make @args install");
+
+    # Do a custom build.
+    runsystem("make @args $target")
+      if $target;
     }
 
   chdir "..";
@@ -269,7 +276,7 @@ sub convertToFramework
   my $xargs = shift;
   my @args = @_;
 
-  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
+  my $frameworkPath = $xargs->{frameworkPath};
 
   my $frameworkVersionPath = 
     "$frameworkPath/Versions/" . $xargs->{version};
@@ -291,8 +298,8 @@ sub convertToFramework
       if $file =~ /^\.\.?$/;
 
     # Delete .la files.
-    unlink "$prefix/lib/$file"
-      if $file =~ /\.la$/;
+    #unlink "$prefix/lib/$file"
+    #  if $file =~ /\.la$/;
 
     # Skip anything that isn't a dynamic library.
     next
@@ -310,11 +317,8 @@ sub convertToFramework
 
   if($library)
     {
-    # Now create the library via hard link.
-    link $library, "$frameworkVersionPath/" . $xargs->{framework};
-
-    # Get rid of the old library.
-    unlink $library;
+    # Move the library to the framework location.
+    rename $library, "$frameworkVersionPath/" . $xargs->{framework};
 
     # Re-create the library as a symbolic link.
     $library = basename($library);
@@ -331,73 +335,65 @@ sub installFramework
   my $xargs = shift;
   my @args = @_;
 
-  my $frameworkPath = sprintf('/tmp/%s.framework', $xargs->{framework});
+  my $frameworkPath = $xargs->{frameworkPath};
+
+  # Create or update the Current links.
+  setCurrentLink($frameworkPath);
 
   my $frameworkVersionPath = 
     "$frameworkPath/Versions/" . $xargs->{version};
   
-  my $targetPath = 
-    sprintf('%s/%s.framework', $xargs->{target}, $xargs->{framework});
-  
-  my $targetVersionPath = "$targetPath/Versions/" . $xargs->{version};
-  
-  system(qq{/bin/mkdir -p "$targetPath/Versions"});
-  
-  system(qq{/bin/rm -Rf "$targetVersionPath"});
-
-  system(qq{/bin/mv "$frameworkVersionPath" "$targetVersionPath"});
-
   # Create framework resources.
   createResources(
-    $xargs->{framework}, $targetPath, $xargs->{version}, $xargs->{id});
-  
-  # Only setup the Current links if I am not cross-compiling.
-  return
-    if not $xargs->{native};
-       
-  # Create or update the Current links.
-  setCurrentLink($targetPath);
+    $xargs->{framework}, 
+    $frameworkVersionPath, 
+    $xargs->{version}, 
+    $xargs->{id});  
   }
   
 # Setup the Current links.
 sub setCurrentLink
   {
   my $frameworkPath = shift;
+  
+  my $frameworkVersionsPath = "$frameworkPath/Versions";
 
   # Should I update the current link?
-  opendir(DIR, "$frameworkPath/Versions");
+  opendir(DIR, $frameworkVersionsPath);
 
   my $latestVersion;
   
   while (defined(my $existingVersion = readdir(DIR)))
     {
+    debug("Current latest version: $latestVersion\n");
+    debug("Found existing version: $existingVersion\n");
     # Skip parent and self directory entries.
     next
-      if $existingVersion =~ /^\.\.?$/;
+      if $existingVersion =~ /^Current|\.\.?$/;
 
     $latestVersion = maxVersion($existingVersion, $latestVersion);
+    debug("Set latest version: $latestVersion\n");
     }
 
   closedir(DIR);
 
+  die "Couldn't find latest version\n"
+    if not $latestVersion;
+    
+  my $frameworkVersionPath = "$frameworkVersionsPath/$latestVersion";
+  
+  mkpath("$frameworkVersionPath/Resources");
+  
   # Create the current symbolic linked directory.
-  unlink "$frameworkPath/Versions/Current";
+  unlink "$frameworkVersionsPath/Current";
 
-  unlink "$frameworkPath/Headers";
-  unlink "$frameworkPath/Programs";
-  unlink "$frameworkPath/Resources";
-  unlink "$frameworkPath/unix";
-  unlink "$frameworkPath/$framework";
-
-  symlink $latestVersion, "$frameworkPath/Versions/Current";
-
-  symlink "Versions/Current/Headers", "$frameworkPath/Headers";
-  symlink "Versions/Current/Programs", "$frameworkPath/Programs";
-  symlink "Versions/Current/Resources", "$frameworkPath/Resources";
-  symlink "Versions/Current/unix", "$frameworkPath/unix";
-
-  # Finally update the top-level library link.
-  symlink "Versions/Current/$framework", "$frameworkPath/$framework";
+  symlink $frameworkVersionPath, "$frameworkVersionsPath/Current";
+  
+  symlink "$frameworkVersionPath/$framework", "$frameworkPath/$framework";
+  symlink "$frameworkVersionPath/Resources", "$frameworkPath/Resources";
+  
+  symlink "$frameworkVersionPath/unix/include", "$frameworkPath/Headers"
+    if -d "$frameworkVersionPath/unix/include";
   }
 
 # Find the maximum of two version number strings.
@@ -535,9 +531,24 @@ sub mkpath
   {
   my $dir = shift;
 
-  system(qq{/bin/mkdir -p "$dir"});
+  runsystem(qq{/bin/mkdir -p "$dir"});
   }
 
+sub debug
+  {
+  my @args = @_;
+  
+  print("@args\n")
+    if $debug;
+  }
+  
+sub runsystem
+  {
+  debug(@_);
+    
+  system(@_);
+  }
+  
 # Print usage messages.
 sub usage
   {
@@ -548,6 +559,8 @@ Usage: lib2framework <framework> <id> <version> <dir> [options]
     --frameworkInstallPath=/path/to/install/location
     --sdk=<SDK in xcrun nomenclature. e.g. macosx, iphonesimulator6.1, etc.>
     --deploy=<minimum OS version>
+    --target=<makefile target>
+    --debug For debugging statements
     
   Remaining options are passed to configure script.
 EOF
