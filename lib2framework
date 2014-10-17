@@ -200,15 +200,8 @@ sub createFramework
   my $frameworkVersionPath = 
     File::Spec->join($frameworkPath, 'Versions', $xargs->{version});
 
-  mkpath("$frameworkVersionPath/Headers");
-  mkpath("$frameworkVersionPath/Programs");
-  mkpath("$frameworkVersionPath/Resources/Engish.lproj");
+  mkpath("$frameworkVersionPath/Resources");
   mkpath("$frameworkVersionPath/unix/lib");
-
-  # Now create some symbolically linked directories.
-  symlink "../Headers", "$frameworkVersionPath/unix/include";
-  symlink "../Programs", "$frameworkVersionPath/unix/bin";
-  symlink "../Resources", "$frameworkVersionPath/unix/share";
   }
 
 # Build a UNIX project in the unix directory of the framework.
@@ -228,6 +221,8 @@ sub buildProject
 
   my $prefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
 
+  my $current = getcwd;
+  
   # Move into the directory.
   chdir $xargs->{source};
 
@@ -267,7 +262,7 @@ sub buildProject
       if $target;
     }
 
-  chdir "..";
+  chdir $current;
   }
 
 # Turn a library into a framework.
@@ -327,6 +322,17 @@ sub convertToFramework
        "../../" . $xargs->{framework}, 
        "$frameworkVersionPath/unix/lib/$library";
     }
+    
+  my $current = getcwd;
+  
+  chdir $frameworkVersionPath;
+  
+  symlink "unix/include", "Headers"
+    if -d "unix/include";
+  symlink "unix/bin", "Programs"
+    if -d "unix/bin";
+    
+  chdir $current;
   }
 
 # Install the framework
@@ -384,16 +390,26 @@ sub setCurrentLink
   
   mkpath("$frameworkVersionPath/Resources");
   
-  # Create the current symbolic linked directory.
-  unlink "$frameworkVersionsPath/Current";
+  my $current = getcwd;
+  
+  chdir "$frameworkPath/Versions";
+  
+  unlink "Current";
+  symlink "$latestVersion", "Current";
+  
+  chdir $frameworkPath;
 
-  symlink $frameworkVersionPath, "$frameworkVersionsPath/Current";
+  unlink $framework;
+  symlink "Versions/Current/$framework", $framework;
   
-  symlink "$frameworkVersionPath/$framework", "$frameworkPath/$framework";
-  symlink "$frameworkVersionPath/Resources", "$frameworkPath/Resources";
-  
-  symlink "$frameworkVersionPath/unix/include", "$frameworkPath/Headers"
-    if -d "$frameworkVersionPath/unix/include";
+  symlink "Versions/Current/Resources", "Resources"
+    if not -d "Resources";
+  symlink "Versions/Current/Headers", "Headers"
+    if not -d "Headers" and -d "Versions/Current/Headers";
+  symlink "Versions/Current/Programs", "Programs"
+    if not -d "Programs" and -d "Versions/Current/Programs";
+      
+  chdir $current;
   }
 
 # Find the maximum of two version number strings.
