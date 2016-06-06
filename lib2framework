@@ -29,6 +29,7 @@ my $archive = shift;
 my $installPath;
 my $sdk;
 my $deployment;
+my $lib;
 my $target;
 my $debug;
 
@@ -37,12 +38,19 @@ GetOptions
   'frameworkInstallPath=s' => \$installPath,
   'sdk=s' => \$sdk,
   'deploy=s' => \$deployment,
+  'lib=s' => \$lib,
   'target=s' => \$target,
   'debug' => \$debug
   );
   
 my $dir;
 
+if(!-e $archive)
+  {
+  printf("Source archive/directory '$archive' not found\n");
+  die usage();
+  }
+  
 # If the archive is a directory, copy it to /tmp to work on it.
 if(-d $archive)
   {
@@ -160,6 +168,7 @@ my $xargs =
   id => $id,
   sdk => $sdk,
   minversion => $minversion,
+  lib => $lib,
   frameworkPath =>     
     File::Spec->join($installPath, sprintf('%s.framework', $framework))
   };
@@ -189,6 +198,12 @@ convertToFramework($xargs);
 
 # Install the final framework.
 installFramework($xargs);
+  
+# Clean up.
+if(-d $archive && !$debug)
+  {
+  runsystem(qq{/bin/rm -Rf "$dir"});
+  }
   
 # Create framework bones.
 sub createFramework
@@ -230,6 +245,24 @@ sub buildProject
   if(-e 'configure')
     {
     runsystem(qq{./configure --prefix=$prefix @args});
+
+    # Make sure we get a fresh build.
+    runsystem("make clean");
+
+    # Build using the provided arguments. If there was a configure script,
+    # the argument list will be empty.
+    runsystem("make");
+
+    # Now install into the framework.
+    runsystem("make install");
+    
+    # Do a custom build.
+    runsystem("make $target")
+      if $target;
+    }
+  elsif(-e 'CMakeLists.txt')
+    {
+    runsystem(qq{cmake -DCMAKE_INSTALL_PREFIX:PATH=$prefix @args});
 
     # Make sure we get a fresh build.
     runsystem("make clean");
@@ -304,6 +337,14 @@ sub convertToFramework
     next
       if -l "$prefix/lib/$file";
 
+    # If I am looking for a specific library, don't look any further.
+    if($xargs->{lib} && ($file eq $xargs->{lib}))
+      {
+      $library = "$prefix/lib/$file";
+      
+      last;
+      }
+      
     # Save the library. I assume there will only be one non-link library.
     $library = "$prefix/lib/$file";
     }
@@ -575,6 +616,7 @@ Usage: lib2framework <framework> <id> <version> <dir> [options]
     --frameworkInstallPath=/path/to/install/location
     --sdk=<SDK in xcrun nomenclature. e.g. macosx, iphonesimulator6.1, etc.>
     --deploy=<minimum OS version>
+    --lib=<primary library name>
     --target=<makefile target>
     --debug For debugging statements
     
