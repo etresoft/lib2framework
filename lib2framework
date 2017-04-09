@@ -26,8 +26,7 @@ my $version = shift;
 my $source = shift;
 
 # Get optional arguments.
-my $help;
-my $installPath;
+my $prefix;
 my $sdk;
 my $deployment;
 my $lib;
@@ -37,8 +36,7 @@ my $debug;
 
 GetOptions
   (
-  'help' => \$help,
-  'frameworkInstallPath=s' => \$installPath,
+  'prefix=s' => \$prefix,
   'sdk=s' => \$sdk,
   'deploy=s' => \$deployment,
   'lib=s' => \$lib,
@@ -46,9 +44,6 @@ GetOptions
   'arch=s' => \$arch,
   'debug' => \$debug
   );
-  
-die usage()
-  if $help;
   
 my $dir;
 
@@ -94,11 +89,11 @@ else
   }
   
 # Set a default framework install path.
-my $defaultInstallPath = File::Spec->join($ENV{HOME}, 'Library/Frameworks');
+my $defaultPrefix = File::Spec->join($ENV{HOME}, 'Library');
 
 # Default to ~/Library/Frameworks
-$installPath = $defaultInstallPath
-  if not $installPath;
+$prefix = $defaultPrefix
+  if not $prefix;
 
 # Set a default SDK.
 $sdk = 'macosx'
@@ -171,11 +166,11 @@ elsif($sdk =~ /^macosx/i)
 my @parts = split /\//, $ENV{SDKROOT};
 my @dirParts = @parts[4..9];
 
-$installPath = 
-  File::Spec->join(
-    $installPath, @dirParts, 'Frameworks')
-  if $installPath ne $defaultInstallPath;
-  
+my $installPath = 
+  $prefix ne $defaultPrefix
+    ? File::Spec->join($prefix, @dirParts, 'Frameworks')
+    : File::Spec->join($prefix, 'Frameworks');
+
 # Setup the isysroot command-line parameters and PATH, if necessary.
 $ENV{PATH} = sprintf(
   '%s:%s:/usr/bin:/bin:/usr/sbin:/sbin',
@@ -183,6 +178,8 @@ $ENV{PATH} = sprintf(
   "/Applications/Xcode.app/Contents/Developer/usr/bin")
 if $sdk && ($sdk =~ /^iphone/i);
   
+my $frameworkDirectory = sprintf('%s.framework', $framework);
+
 my $xargs = 
   {
   framework => $framework,
@@ -192,7 +189,7 @@ my $xargs =
   minversion => $minversion,
   lib => $lib,
   frameworkPath =>     
-    File::Spec->join($installPath, sprintf('%s.framework', $framework))
+    File::Spec->join($installPath, $frameworkDirectory)
   };
 
 # Create a full install directory tree.
@@ -256,7 +253,7 @@ sub buildProject
 
   runsystem(qq{/bin/mkdir -p "$frameworkVersionPath/unix"});
 
-  my $prefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
+  my $installPrefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
 
   my $current = getcwd;
   
@@ -270,7 +267,7 @@ sub buildProject
   # If there is a configure script, pass the args to it.
   if(-e 'configure')
     {
-    runsystem(qq{./configure --prefix=$prefix @args});
+    runsystem(qq{./configure --prefix=$installPrefix @args});
 
     # If a target was specified, do only that.
     if($target)
@@ -285,7 +282,7 @@ sub buildProject
     }
   elsif(-e 'CMakeLists.txt')
     {
-    runsystem(qq{cmake -DCMAKE_INSTALL_PREFIX:PATH=$prefix @args});
+    runsystem(qq{cmake -DCMAKE_INSTALL_PREFIX:PATH=$installPrefix @args});
 
     # If a target was specified, do only that.
     if($target)
@@ -367,7 +364,10 @@ sub convertToFramework
       }
       
     # Save the library. I assume there will only be one non-link library.
-    $library = "$prefix/lib/$file";
+    if($file =~ /^lib$xargs->{framework}\..+$/i)
+      {
+      $library = "$prefix/lib/$file";
+      }
     }
 
   closedir(DIR);
@@ -375,19 +375,15 @@ sub convertToFramework
   if($library)
     {
     my $path = "$frameworkVersionPath/" . $xargs->{framework};
+    my $rpath = 
+      File::Spec->join('@rpath', $frameworkDirectory, $xargs->{framework});
 
-    # Move the library to the framework location.
-    rename $library, $path;
-
-    # Re-create the library as a symbolic link.
-    $library = basename($library);
-
-    symlink 
-       "../../" . $xargs->{framework}, 
-       "$frameworkVersionPath/unix/lib/$library";
+    my ($relativePath) = $library =~ m|^$frameworkVersionPath/(.+)$|;
+    
+    symlink $relativePath, $path;
 
     # Now change the id of the library to be the new path.
-    runsystem(qq{install_name_tool -id "$path" "$path"});
+    runsystem(qq{install_name_tool -id "$rpath" "$path"});
     }
     
   my $current = getcwd;
@@ -399,7 +395,121 @@ sub convertToFramework
   symlink "unix/bin", "Programs"
     if -d "unix/bin";
     
+  # Change all hard-coded paths to rpath in other dynamic libraries.
+  changePathsInDirectory($frameworkVersionPath, 'unix/lib');
+  
+  # Change all hard-coded paths to rpath in executables. 
+  changePathsInDirectory($frameworkVersionPath, 'unix/bin');
+  
+  # Add a search path to all executables.
+  addSearchPathsInDirectory('unix/bin');
+  
   chdir $current;
+  }
+
+# Change all paths in a directory to an rpath.
+sub changePathsInDirectory
+  {
+  my $frameworkVersionPath = shift;
+  my $dir = shift;
+
+  # Scan through the UNIX output lib directory.
+  opendir(DIR, $dir);
+
+  while (defined(my $file = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $file =~ /^\.\.?$/;
+
+    my $path = File::Spec->join($dir, $file);
+    
+    # Skip symbolic links.
+    next
+      if -l $path;
+
+    # Skip static library files.
+    next
+      if $file =~ /\.la$/;
+
+    # Process dynamic libraries.
+    my $process = 0;
+    
+    $process = 1
+      if $file =~ /\.dylib$/;
+
+    # Process executables.
+    $process = 1
+      if -f $path and -x $path;
+      
+    # Now change the paths.
+    changePaths($frameworkVersionPath, $path)
+      if $process;
+    }
+
+  closedir(DIR);
+  }
+  
+# Change all paths in a file to an rpath.
+sub changePaths
+  {
+  my $frameworkVersionPath = shift;
+  my $path = shift;
+  
+  my @lines = `otool -L "$path"`;
+   
+  shift @lines;
+  
+  foreach my $line (@lines)
+    {
+    chomp $line;
+    
+    my ($dylib) = $line =~ /^\s(.+)\s+\(.+\)$/;
+    
+    if($dylib =~ m|^$installPath/(.+)|)
+      {
+      my $rdylib = '@rpath/' . $1;
+      
+      # Now change the id of the library to be the new path.
+      runsystem(qq{install_name_tool -change "$dylib" "$rdylib" "$path"});
+      }
+    }
+  }
+
+# Add a search path to all executables.
+sub addSearchPathsInDirectory
+  {
+  my $dir = shift;
+
+  my $rpath = '@executable_path' . '/../../../../..';
+  
+  # Scan through the UNIX output lib directory.
+  opendir(DIR, $dir);
+
+  while (defined(my $file = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $file =~ /^\.\.?$/;
+
+    my $path = File::Spec->join($dir, $file);
+    
+    # Skip symbolic links.
+    next
+      if -l $path;
+
+    # Skip static library files.
+    next
+      if $file =~ /\.la$/;
+
+    # Process executables.
+    if(-f $path and -x $path)
+      {
+      runsystem(qq{install_name_tool -add_rpath "$rpath" "$path"});
+      }
+    }
+
+  closedir(DIR);
   }
 
 # Install the framework
@@ -451,7 +561,7 @@ sub setCurrentLink
   closedir(DIR);
 
   die "Couldn't find latest version\n"
-    if not $latestVersion;
+    if not defined($latestVersion) or (length($latestVersion) < 1);
     
   my $frameworkVersionPath = "$frameworkVersionsPath/$latestVersion";
   
@@ -467,7 +577,8 @@ sub setCurrentLink
   chdir $frameworkPath;
 
   unlink $framework;
-  symlink "Versions/Current/$framework", $framework;
+  symlink "Versions/Current/$framework", $framework
+    if -f "Versions/Current/$framework";
   
   symlink "Versions/Current/Resources", "Resources"
     if not -d "Resources";
@@ -583,26 +694,26 @@ sub getPlist
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleDevelopmentRegion</key>
-	<string>English</string>
-	<key>CFBundleExecutable</key>
-	<string>$frameworkName</string>
-	<key>CFBundleGetInfoString</key>
-	<string>$framework $version</string>
-	<key>CFBundleIdentifier</key>
-	<string>$id</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>$frameworkName</string>
-	<key>CFBundlePackageType</key>
-	<string>FMWK</string>
-	<key>CFBundleShortVersionString</key>
-	<string>$version</string>
-	<key>CFBundleSignature</key>
-	<string>????</string>
-	<key>CFBundleVersion</key>
-	<string>$frameworkName $version</string>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>English</string>
+  <key>CFBundleExecutable</key>
+  <string>$frameworkName</string>
+  <key>CFBundleGetInfoString</key>
+  <string>$framework $version</string>
+  <key>CFBundleIdentifier</key>
+  <string>$id</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>$frameworkName</string>
+  <key>CFBundlePackageType</key>
+  <string>FMWK</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$version</string>
+  <key>CFBundleSignature</key>
+  <string>????</string>
+  <key>CFBundleVersion</key>
+  <string>$frameworkName $version</string>
 </dict>
 </plist>
 EOF
@@ -645,7 +756,7 @@ Usage: lib2framework <framework> <id> <version> <source> [options]
     <source> is a souce tarball, zip file, or directory    
 
   where [options] can be:
-    --frameworkInstallPath=/path/to/install/location
+    --prefix=/path/to/install/location
     --sdk=<SDK in xcrun nomenclature. e.g. macosx, iphonesimulator6.1, etc.>
     --deploy=<minimum OS version>
     --lib=<primary library name>
