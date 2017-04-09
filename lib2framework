@@ -22,60 +22,73 @@ my $id = shift;
 # Get the version.
 my $version = shift;
 
-# Get the archive to build.
-my $archive = shift;
+# Get the source archive to build.
+my $source = shift;
 
 # Get optional arguments.
+my $help;
 my $installPath;
 my $sdk;
 my $deployment;
 my $lib;
 my $target;
+my $arch;
 my $debug;
 
 GetOptions
   (
+  'help' => \$help,
   'frameworkInstallPath=s' => \$installPath,
   'sdk=s' => \$sdk,
   'deploy=s' => \$deployment,
   'lib=s' => \$lib,
   'target=s' => \$target,
+  'arch=s' => \$arch,
   'debug' => \$debug
   );
   
+die usage()
+  if $help;
+  
 my $dir;
 
-if(!-e $archive)
+if(!-e $source)
   {
-  printf("Source archive/directory '$archive' not found\n");
+  printf("Source archive/directory '$source' not found\n");
   die usage();
   }
   
+my $archive = basename($source);
+
+my $tmpdir = File::Spec->join('/tmp', $archive);
+
 # If the archive is a directory, copy it to /tmp to work on it.
 if(-d $archive)
   {
-  $dir = File::Spec->join('/tmp', $archive);
+  $dir = $tmpdir;
   
   runsystem(qq{/bin/rm -Rf "$dir"});
-  runsystem(qq{/bin/cp -R "$archive" "$dir"});
+  runsystem(qq{/bin/cp -R "$source" "$dir"});
   }
-elsif($archive =~ /\.tgz|\.tar\.gz$/)
+else
   {
-  runsystem(qq{/bin/rm -Rf "/tmp/$archive"});
-  runsystem(qq{/bin/mkdir -p "/tmp/$archive"});
-  runsystem(qq{/usr/bin/tar zxf "$archive" -C/tmp/$archive});
-  
-  $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
-  
-  chomp $dir;
-  }
-elsif($archive =~ /\.tbz|\.tar\.bz$/)
-  {
-  runsystem(qq{/bin/rm -Rf "/tmp/$archive"});
-  runsystem(qq{/bin/mkdir -p "/tmp/$archive"});
-  runsystem(qq{/usr/bin/tar jxf "$archive" -C/tmp/$archive});
-  
-  $dir = `/usr/bin/find /tmp/$archive -mindepth 1 -maxdepth 1`;
+  runsystem(qq{/bin/rm -Rf "$tmpdir"});
+  runsystem(qq{/bin/mkdir -p "$tmpdir"});
+
+  if($archive =~ /\.tgz|\.tar\.gz$/)
+    {
+    runsystem(qq{/usr/bin/tar zxf "$source" "-C$tmpdir"});
+    } 
+  elsif($archive =~ /\.tbz|\.tar\.bz2$/)
+    {
+    runsystem(qq{/usr/bin/tar jxf "$source" "-C/tmp/$archive"});
+    }
+  elsif($archive =~ /\.zip$/)
+    {
+    runsystem(qq{/usr/bin/unzip "$source" -d "/tmp/$archive"});
+    }
+
+  $dir = `/usr/bin/find $tmpdir -mindepth 1 -maxdepth 1`;
   
   chomp $dir;
   }
@@ -114,7 +127,10 @@ my $minversion = '';
 # Configure for iPhone.
 if($sdk =~ /^iphoneos/i)
   {
-  @arch = qw(armv7 armv7s arm64);
+  @arch = 
+    $arch
+      ? split(/\s+/, $arch)
+      : qw(armv7 armv7s arm64);
 
   $minversion = sprintf('-miphoneos-version-min=%s', $deployment);
     
@@ -126,7 +142,10 @@ if($sdk =~ /^iphoneos/i)
 # Configure for iPhone simulator.
 elsif($sdk =~ /^iphonesimulator/i)
   {
-  @arch = qw(i386 x86_64);
+  @arch = 
+    $arch
+      ? split(/\s+/, $arch)
+      : qw(i386 x86_64);
 
   $minversion = sprintf('-mios-simulator-version-min=%s', $deployment);
 
@@ -138,7 +157,10 @@ elsif($sdk =~ /^macosx/i)
   {
   my ($version) = $sdk =~ /^macosx(.+)$/i;
   
-  @arch = qw(i386 x86_64);
+  @arch = 
+    $arch
+      ? split(/\s+/, $arch)
+      : qw(i386 x86_64);
     
   $minversion = sprintf('-mmacosx-version-min=%s', $deployment);
 
@@ -200,9 +222,9 @@ convertToFramework($xargs);
 installFramework($xargs);
   
 # Clean up.
-if(-d $archive && !$debug)
+if(!$debug)
   {
-  runsystem(qq{/bin/rm -Rf "$dir"});
+  runsystem(qq{/bin/rm -Rf "$tmpdir"});
   }
   
 # Create framework bones.
@@ -241,58 +263,57 @@ sub buildProject
   # Move into the directory.
   chdir $xargs->{source};
 
+  # I'm probably going to need to hack up the dynamic libraries
+  # when I'm done.
+  $ENV{LDFLAGS} = "$ENV{LDFLAGS} -headerpad_max_install_names";
+
   # If there is a configure script, pass the args to it.
   if(-e 'configure')
     {
     runsystem(qq{./configure --prefix=$prefix @args});
 
-    # Make sure we get a fresh build.
-    runsystem("make clean");
-
-    # Build using the provided arguments. If there was a configure script,
-    # the argument list will be empty.
-    runsystem("make");
-
-    # Now install into the framework.
-    runsystem("make install");
-    
-    # Do a custom build.
-    runsystem("make $target")
-      if $target;
+    # If a target was specified, do only that.
+    if($target)
+      {
+      runsystem("make $target")
+      }
+    else
+      {
+      # Now install into the framework.
+      runsystem("make install");
+      }
     }
   elsif(-e 'CMakeLists.txt')
     {
     runsystem(qq{cmake -DCMAKE_INSTALL_PREFIX:PATH=$prefix @args});
 
-    # Make sure we get a fresh build.
-    runsystem("make clean");
-
-    # Build using the provided arguments. If there was a configure script,
-    # the argument list will be empty.
-    runsystem("make");
-
-    # Now install into the framework.
-    runsystem("make install");
-    
-    # Do a custom build.
-    runsystem("make $target")
-      if $target;
+    # If a target was specified, do only that.
+    if($target)
+      {
+      runsystem("make $target")
+      }
+    else
+      {
+      # Build and install.
+      runsystem("make install");
+      }
     }
   else
     {
     # Make sure we get a fresh build.
     runsystem("make @args clean");
 
-    # Build using the provided arguments. If there was a configure script,
-    # the argument list will be empty.
-    runsystem("make @args");
-
-    # Now install into the framework.
-    runsystem("make @args install");
-
-    # Do a custom build.
-    runsystem("make @args $target")
-      if $target;
+    # If a target was specified, do only that.
+    if($target)
+      {
+      runsystem("make @args $target")
+      }
+    else
+      {
+      # Build and install using the provided arguments. If there was a 
+      # configure script, the argument list will be empty.
+      runsystem("make @args install");
+      }
     }
 
   chdir $current;
@@ -353,8 +374,10 @@ sub convertToFramework
 
   if($library)
     {
+    my $path = "$frameworkVersionPath/" . $xargs->{framework};
+
     # Move the library to the framework location.
-    rename $library, "$frameworkVersionPath/" . $xargs->{framework};
+    rename $library, $path;
 
     # Re-create the library as a symbolic link.
     $library = basename($library);
@@ -362,6 +385,9 @@ sub convertToFramework
     symlink 
        "../../" . $xargs->{framework}, 
        "$frameworkVersionPath/unix/lib/$library";
+
+    # Now change the id of the library to be the new path.
+    runsystem(qq{install_name_tool -id "$path" "$path"});
     }
     
   my $current = getcwd;
@@ -595,7 +621,7 @@ sub debug
   {
   my @args = @_;
   
-  print("@args\n")
+  print("DEBUG: @args\n")
     if $debug;
   }
   
@@ -610,17 +636,24 @@ sub runsystem
 sub usage
   {
   my $message = << "EOF";
-Usage: lib2framework <framework> <id> <version> <dir> [options]
+Usage: lib2framework <framework> <id> <version> <source> [options]
 
-  where options are:
+  where:
+    <framework> is the framework name
+    <id> is the framework bundle ID
+    <version> is the framework version
+    <source> is a souce tarball, zip file, or directory    
+
+  where [options] can be:
     --frameworkInstallPath=/path/to/install/location
     --sdk=<SDK in xcrun nomenclature. e.g. macosx, iphonesimulator6.1, etc.>
     --deploy=<minimum OS version>
     --lib=<primary library name>
     --target=<makefile target>
+    --arch=<build architecture(s)>
     --debug For debugging statements
     
-  Remaining options are passed to configure script.
+  Remaining arguments are passed to configure script.
 EOF
 
   return $message;
