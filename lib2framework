@@ -264,6 +264,16 @@ sub buildProject
   # when I'm done.
   $ENV{LDFLAGS} = "$ENV{LDFLAGS} -headerpad_max_install_names";
 
+  # Check for a project that isn't fully configured.
+  if(!-e 'configure' && -e 'configure.ac')
+    {
+    $ENV{LIBTOOLIZE} = 'libtoolize';
+    
+    runsystem(qq{libtoolize});
+
+    runsystem(qq{autoreconf --force --install});
+    }
+    
   # If there is a configure script, pass the args to it.
   if(-e 'configure')
     {
@@ -282,7 +292,9 @@ sub buildProject
     }
   elsif(-e 'CMakeLists.txt')
     {
-    runsystem(qq{cmake -DCMAKE_INSTALL_PREFIX:PATH=$installPrefix @args});
+    my $cmake = '/Applications/CMake.app/Contents/bin/cmake';
+    
+    runsystem(qq{$cmake -DCMAKE_INSTALL_PREFIX:PATH=$installPrefix @args});
 
     # If a target was specified, do only that.
     if($target)
