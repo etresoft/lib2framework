@@ -58,7 +58,7 @@ my $archive = basename($source);
 my $tmpdir = File::Spec->join('/tmp', $archive);
 
 # If the archive is a directory, copy it to /tmp to work on it.
-if(-d $archive)
+if(-d $source)
   {
   $dir = $tmpdir;
   
@@ -175,7 +175,7 @@ my $installPath =
 $ENV{PATH} = sprintf(
   '%s:%s:/usr/bin:/bin:/usr/sbin:/sbin',
   $ENV{SDKROOT},
-  "/Applications/Xcode.app/Contents/Developer/usr/bin")
+  '/Applications/Xcode.app/Contents/Developer/usr/bin')
 if $sdk && ($sdk =~ /^iphone/i);
   
 my $frameworkDirectory = sprintf('%s.framework', $framework);
@@ -249,8 +249,10 @@ sub buildProject
   my $frameworkVersionPath =  
     "$frameworkPath/Versions/" . $xargs->{version};
 
+  # Clean up any existing framework.
   runsystem(qq{/bin/rm -Rf "$frameworkVersionPath"});
 
+  # Prepare the work area.
   runsystem(qq{/bin/mkdir -p "$frameworkVersionPath/unix"});
 
   my $installPrefix = File::Spec->rel2abs("$frameworkVersionPath/unix");
@@ -279,50 +281,37 @@ sub buildProject
     {
     runsystem(qq{./configure --prefix=$installPrefix @args});
 
-    # If a target was specified, do only that.
-    if($target)
-      {
-      runsystem("make $target")
-      }
-    else
-      {
-      # Now install into the framework.
-      runsystem("make install");
-      }
+    # And don't use them again.
+    @args = ();
     }
+    
+  # If there is a CMake script, try to build with CMake.
   elsif(-e 'CMakeLists.txt')
     {
     my $cmake = '/Applications/CMake.app/Contents/bin/cmake';
     
     runsystem(qq{$cmake -DCMAKE_INSTALL_PREFIX:PATH=$installPrefix @args});
+    
+    # Don't use the args again.
+    @args = ();
+    }
 
-    # If a target was specified, do only that.
-    if($target)
-      {
-      runsystem("make $target")
-      }
-    else
-      {
-      # Build and install.
-      runsystem("make install");
-      }
+  # Now build the project.
+  runsystem("make @args");
+
+  # Add a search path to all executables.
+  addSearchPathsInDirectory($xargs->{source}, $installPath);
+
+  # If a target was specified, do only that.
+  if($target)
+    {
+    runsystem("make @args $target")
     }
   else
     {
-    # Make sure we get a fresh build.
-    runsystem("make @args clean");
-
-    # If a target was specified, do only that.
-    if($target)
-      {
-      runsystem("make @args $target")
-      }
-    else
-      {
-      # Build and install using the provided arguments. If there was a 
-      # configure script, the argument list will be empty.
-      runsystem("make @args install");
-      }
+    # Build and install using the provided arguments. If there was a 
+    # configure script, the argument list will be empty.
+    runsystem("make @args install");
     }
 
   chdir $current;
@@ -346,8 +335,11 @@ sub convertToFramework
   # First I have to find the library.
   my $library;
 
+  my $libdir = File::Spec->join($prefix, 'lib');
+  my $bindir = File::Spec->join($prefix, 'bin');
+  
   # Scan through the UNIX output lib directory.
-  opendir(DIR, "$prefix/lib");
+  opendir(DIR, $libdir);
 
   while (defined(my $file = readdir(DIR)))
     {
@@ -365,12 +357,13 @@ sub convertToFramework
 
     # Skip symbolic links.
     next
-      if -l "$prefix/lib/$file";
+      if -l "$libdir/$file";
 
     # If I am looking for a specific library, don't look any further.
     if($xargs->{lib} && ($file eq $xargs->{lib}))
       {
-      $library = "$prefix/lib/$file";
+      $library = "$libdir/$file";
+      debug("Found requested library at $library");
       
       last;
       }
@@ -378,7 +371,8 @@ sub convertToFramework
     # Save the library. I assume there will only be one non-link library.
     if($file =~ /^lib$xargs->{framework}\..+$/i)
       {
-      $library = "$prefix/lib/$file";
+      $library = "$libdir/$file";
+      debug("Using library at $library");
       }
     }
 
@@ -387,36 +381,81 @@ sub convertToFramework
   if($library)
     {
     my $path = "$frameworkVersionPath/" . $xargs->{framework};
-    my $rpath = 
-      File::Spec->join('@rpath', $frameworkDirectory, $xargs->{framework});
 
     my ($relativePath) = $library =~ m|^$frameworkVersionPath/(.+)$|;
     
     symlink $relativePath, $path;
-
-    # Now change the id of the library to be the new path.
-    runsystem(qq{install_name_tool -id "$rpath" "$path"});
+    debug("Linking $path to $relativePath");
     }
     
   my $current = getcwd;
   
   chdir $frameworkVersionPath;
   
-  symlink "unix/include", "Headers"
-    if -d "unix/include";
-  symlink "unix/bin", "Programs"
-    if -d "unix/bin";
+  symlink 'unix/include', 'Headers'
+    if -d 'unix/include';
+  symlink 'unix/bin', 'Programs'
+    if -d 'unix/bin';
     
+  # Change all ids to rpaths in all dynamic libraries.
+  changeIdsInDirectory($frameworkVersionPath, $libdir);
+  
   # Change all hard-coded paths to rpath in other dynamic libraries.
-  changePathsInDirectory($frameworkVersionPath, 'unix/lib');
+  changePathsInDirectory($frameworkVersionPath, $libdir);
   
   # Change all hard-coded paths to rpath in executables. 
-  changePathsInDirectory($frameworkVersionPath, 'unix/bin');
+  changePathsInDirectory($frameworkVersionPath, $bindir);
   
   # Add a search path to all executables.
-  addSearchPathsInDirectory('unix/bin');
+  addSearchPathsInDirectory($bindir, '@executable_path/../../../../..');
   
   chdir $current;
+  }
+
+# Change the ID in all librarie in a directory to an rpath.
+sub changeIdsInDirectory
+  {
+  my $frameworkVersionPath = shift;
+  my $dir = shift;
+
+  # Scan through the UNIX output lib directory.
+  opendir(DIR, $dir);
+
+  while (defined(my $file = readdir(DIR)))
+    {
+    # Skip parent and self directory entries.
+    next
+      if $file =~ /^\.\.?$/;
+
+    my $path = File::Spec->join($dir, $file);
+    
+    # Skip symbolic links.
+    next
+      if -l $path;
+
+    # Now change the paths.
+    changeId($frameworkVersionPath, $path)
+      if $file =~ /\.dylib$/;
+    }
+
+  closedir(DIR);
+  }
+  
+# Change the ID in a file to an rpath.
+sub changeId
+  {
+  my $frameworkVersionPath = shift;
+  my $path = shift;
+  
+  my ($versionPath) = $frameworkVersionPath =~ m|^$installPath/(.+)$|;
+  
+  my ($relativePath) = $path =~ m|^$frameworkVersionPath/(.+)$|;
+    
+  my $rpath = 
+    File::Spec->join('@rpath', $versionPath, $relativePath);
+
+  # Now change the id of the library to be the new path.
+  runsystem(qq{install_name_tool -id "$rpath" "$path"});
   }
 
 # Change all paths in a directory to an rpath.
@@ -492,19 +531,15 @@ sub changePaths
 sub addSearchPathsInDirectory
   {
   my $dir = shift;
+  my $rpath = shift;
 
-  my $rpath = '@executable_path' . '/../../../../..';
+  my @files = `find $dir -type f -perm +111 -print`;
   
-  # Scan through the UNIX output lib directory.
-  opendir(DIR, $dir);
-
-  while (defined(my $file = readdir(DIR)))
+  foreach my $file (@files)
     {
-    # Skip parent and self directory entries.
-    next
-      if $file =~ /^\.\.?$/;
-
-    my $path = File::Spec->join($dir, $file);
+    chomp $file;
+    
+    my $path = File::Spec->rel2abs($file);
     
     # Skip symbolic links.
     next
@@ -514,14 +549,15 @@ sub addSearchPathsInDirectory
     next
       if $file =~ /\.la$/;
 
-    # Process executables.
-    if(-f $path and -x $path)
-      {
-      runsystem(qq{install_name_tool -add_rpath "$rpath" "$path"});
-      }
-    }
+    # Skip dynamic library files.
+    next
+      if $file =~ /\.dylib$/;
 
-  closedir(DIR);
+    # I may have needed to hack up the rpath at link time.
+    runsystem(qq{install_name_tool -delete_rpath "$installPath" "$path"});
+    
+    runsystem(qq{install_name_tool -add_rpath "$rpath" "$path"});
+    }
   }
 
 # Install the framework
@@ -560,14 +596,14 @@ sub setCurrentLink
   
   while (defined(my $existingVersion = readdir(DIR)))
     {
-    debug("Current latest version: $latestVersion\n");
-    debug("Found existing version: $existingVersion\n");
+    debug("Current latest version: $latestVersion");
+    debug("Found existing version: $existingVersion");
     # Skip parent and self directory entries.
     next
       if $existingVersion =~ /^Current|\.\.?$/;
 
     $latestVersion = maxVersion($existingVersion, $latestVersion);
-    debug("Set latest version: $latestVersion\n");
+    debug("Set latest version: $latestVersion");
     }
 
   closedir(DIR);
@@ -583,8 +619,8 @@ sub setCurrentLink
   
   chdir "$frameworkPath/Versions";
   
-  unlink "Current";
-  symlink "$latestVersion", "Current";
+  unlink 'Current';
+  symlink "$latestVersion", 'Current';
   
   chdir $frameworkPath;
 
@@ -592,12 +628,12 @@ sub setCurrentLink
   symlink "Versions/Current/$framework", $framework
     if -f "Versions/Current/$framework";
   
-  symlink "Versions/Current/Resources", "Resources"
-    if not -d "Resources";
-  symlink "Versions/Current/Headers", "Headers"
-    if not -d "Headers" and -d "Versions/Current/Headers";
-  symlink "Versions/Current/Programs", "Programs"
-    if not -d "Programs" and -d "Versions/Current/Programs";
+  symlink 'Versions/Current/Resources', 'Resources'
+    if not -d 'Resources';
+  symlink 'Versions/Current/Headers', 'Headers'
+    if not -d 'Headers' and -d 'Versions/Current/Headers';
+  symlink 'Versions/Current/Programs', 'Programs'
+    if not -d 'Programs' and -d 'Versions/Current/Programs';
       
   chdir $current;
   }
